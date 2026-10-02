@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: schedular
+  # Metadata DB (jobs, connections, run history). Defaults match docker-compose.yml.
+  datasource:
+    url: ${SCHEDULAR_DB_URL:jdbc:postgresql://localhost:5432/schedular_meta}
+    username: ${SCHEDULAR_DB_USER:schedular}
+    password: ${SCHEDULAR_DB_PASSWORD:schedular}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+  mvc:
+    problemdetails:
+      enabled: true
+  threads:
+    virtual:
+      enabled: true
+
+schedular:
+  # Base64 AES-256 key for encrypting connection passwords: `openssl rand -base64 32`.
+  # Keep it stable: changing it makes stored passwords unreadable.
+  secret-key: ${SCHEDULAR_SECRET_KEY:}
+  connection-test-timeout: 15s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics

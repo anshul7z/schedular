@@ -1,0 +1,11 @@
+# Run without Docker: `mvnw spring-boot:run -Dspring-boot.run.profiles=local`
+# Keeps the metadata DB in an embedded H2 file under ./data.
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/schedular-meta;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+    username: sa
+    password: ""
+
+schedular:
+  # DEV ONLY. Never use this key outside local development.
+  secret-key: ${SCHEDULAR_SECRET_KEY:+jTiAso6PNdYSvIrDD1jVfLndHpegxd1xjVDcl+XZiU=}

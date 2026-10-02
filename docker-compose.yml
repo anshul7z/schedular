@@ -1,0 +1,57 @@
+# Local development stack.
+#   postgres : metadata DB (schedular_meta) + a "warehouse" database to use as a migration target
+#   mongo    : migration source, seeded with sample data from docker/mongo/seed.js
+#   mysql    : a second migration target
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: schedular_meta
+      POSTGRES_USER: schedular
+      POSTGRES_PASSWORD: schedular
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U schedular -d schedular_meta"]
+      interval: 5s
+      retries: 10
+
+  mongo:
+    image: mongo:8
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root
+      MONGO_INITDB_DATABASE: shop
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+      - ./docker/mongo/seed.js:/docker-entrypoint-initdb.d/seed.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      retries: 10
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: warehouse
+      MYSQL_USER: warehouse
+      MYSQL_PASSWORD: warehouse
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  postgres-data:
+  mongo-data:
+  mysql-data:
