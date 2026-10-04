@@ -4,12 +4,13 @@ A scheduler service that migrates data from NoSQL (MongoDB) into SQL databases (
 SQL Server, Oracle). The architecture is described in [docs/HLD.md](docs/HLD.md), and the implementation
 roadmap is in [docs/PLAN.md](docs/PLAN.md).
 
-**Status:** Phase 1 (foundation) is done:
-- the metadata DB schema
-- domain entities and repositories
-- the connection API: CRUD, encrypted passwords, connection test, and listing collections/tables
-
-The migration engine (Phase 2) and scheduling (Phase 3) are next.
+**Status:**
+- **Phase 1 (foundation), done:** the metadata DB schema, domain entities, and the connection API (CRUD, encrypted
+  passwords, connection test, listing collections/tables).
+- **Phase 2 (migration engine), done:** MongoDB → PostgreSQL with FULL and INCREMENTAL sync, configurable mapping
+  (flatten, JSON column, child tables), checkpoints and resume, retries, and dead letters for bad documents.
+- **Phase 3, next:** scheduling (Quartz) and the job/run REST API. Until then, jobs can only be created and run from
+  code; see `MigrationExecutorTest` for working examples.
 
 ## Requirements
 - Java 21
@@ -79,8 +80,31 @@ curl -X POST localhost:8080/api/connections/1/test
 curl localhost:8080/api/connections/1/collections
 ```
 
+## How a migration run works
+For each collection mapping in a job, the run:
+1. creates the target tables and columns if they are missing (when `autoCreateSchema` is on)
+2. reads the collection in batches (`batchSize`, default 1000), mapping each document to a parent row plus child-table
+   rows
+3. writes each batch in one transaction, then saves a checkpoint
+
+Writes are upserts by primary key, so re-running is safe: rows are never duplicated, and a failed run resumes after
+its last committed batch.
+
+What happens to bad data:
+- **A document can't be converted** (wrong type, too long, no `_id`): it goes to the dead-letter table and the run
+  ends `PARTIAL`.
+- **The database rejects a row:** the batch is retried one document at a time, so only the bad ones are
+  dead-lettered.
+- **A transient error** (lost connection, deadlock): the batch is retried with backoff, up to the job's `maxRetries`.
+
+The mapping format and every option are described in [docs/HLD.md §6–7](docs/HLD.md#6-data-design).
+
 ## Tests
 ```powershell
 .\mvnw.cmd test
 ```
-Tests use an in-memory H2 metadata DB and need no Docker.
+No Docker is needed:
+- **Metadata DB:** an in-memory H2 database.
+- **Engine and connection tests:** real **embedded MongoDB and PostgreSQL** processes. The binaries are downloaded
+  once, on the first run, and cached.
+- **Production setup:** one test boots the whole app with PostgreSQL as its metadata DB.

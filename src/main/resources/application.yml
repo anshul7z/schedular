@@ -24,6 +24,11 @@ schedular:
   # Keep it stable: changing it makes stored passwords unreadable.
   secret-key: ${SCHEDULAR_SECRET_KEY:}
   connection-test-timeout: 15s
+  engine:
+    # Transient write failures (lost connection, deadlock) are retried up to the job's maxRetries,
+    # waiting retry-backoff, then doubling up to max-retry-backoff.
+    retry-backoff: 1s
+    max-retry-backoff: 30s
 
 management:
   endpoints:

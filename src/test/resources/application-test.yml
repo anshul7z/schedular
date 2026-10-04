@@ -7,3 +7,6 @@ spring:
 schedular:
   secret-key: p1eay0WpHMCp+dvPlcx+HwHQD/eRfJUTSYKHWiZGSm0=
   connection-test-timeout: 5s
+  engine:
+    retry-backoff: 10ms
+    max-retry-backoff: 50ms

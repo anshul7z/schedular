@@ -12,7 +12,7 @@ class SecretCipherTest {
 
     private static final String KEY = Base64.getEncoder().encodeToString(new byte[32]);
 
-    private final SecretCipher cipher = new SecretCipher(new SchedularProperties(KEY, null));
+    private final SecretCipher cipher = new SecretCipher(new SchedularProperties(KEY, null, null));
 
     @Test
     void roundTrips() {
@@ -38,7 +38,7 @@ class SecretCipherTest {
         byte[] otherKey = new byte[32];
         otherKey[0] = 1;
         SecretCipher other = new SecretCipher(
-                new SchedularProperties(Base64.getEncoder().encodeToString(otherKey), null));
+                new SchedularProperties(Base64.getEncoder().encodeToString(otherKey), null, null));
 
         assertThatThrownBy(() -> cipher.decrypt(other.encrypt("x")))
                 .isInstanceOf(IllegalStateException.class)
@@ -47,10 +47,10 @@ class SecretCipherTest {
 
     @Test
     void rejectsMissingOrWrongSizeKey() {
-        assertThatThrownBy(() -> new SecretCipher(new SchedularProperties("", null)))
+        assertThatThrownBy(() -> new SecretCipher(new SchedularProperties("", null, null)))
                 .hasMessageContaining("SCHEDULAR_SECRET_KEY");
         assertThatThrownBy(() -> new SecretCipher(
-                new SchedularProperties(Base64.getEncoder().encodeToString(new byte[16]), null)))
+                new SchedularProperties(Base64.getEncoder().encodeToString(new byte[16]), null, null)))
                 .hasMessageContaining("32 bytes");
     }
 }

@@ -21,12 +21,12 @@ public class Checkpoint {
     @Column(name = "job_id", nullable = false)
     private Long jobId;
 
-    /** Last source _id written in the current FULL run (string form). */
-    @Column(name = "last_id")
+    /** FULL mode: last source id written by an unfinished run, as Extended JSON; null once a run completes. */
+    @Column(name = "last_id", length = 2000)
     private String lastId;
 
-    /** Highest watermark value written by the last successful INCREMENTAL run (string form). */
-    @Column(name = "last_watermark")
+    /** INCREMENTAL mode: highest watermark value written so far, as Extended JSON. */
+    @Column(name = "last_watermark", length = 2000)
     private String lastWatermark;
 
     @Column(name = "updated_at", nullable = false)

@@ -19,7 +19,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ConnectionResolverTest {
 
     private final SecretCipher cipher = new SecretCipher(
-            new SchedularProperties(Base64.getEncoder().encodeToString(new byte[32]), null));
+            new SchedularProperties(Base64.getEncoder().encodeToString(new byte[32]), null, null));
     private final ConnectionResolver resolver = new ConnectionResolver(cipher);
 
     @ParameterizedTest

@@ -4,6 +4,10 @@ import com.data.schedular.domain.ConnectionDef;
 import com.data.schedular.domain.MigrationJob;
 import com.data.schedular.repository.ConnectionDefRepository;
 import com.data.schedular.repository.MigrationJobRepository;
+import com.data.schedular.support.EmbeddedDatabases;
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
+import org.bson.Document;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -14,8 +18,13 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.Statement;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -124,6 +133,39 @@ class ConnectionControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.success").value(false))
                 .andExpect(jsonPath("$.message").isNotEmpty());
+    }
+
+    @Test
+    void testsAndListsRealMongoAndPostgres() throws Exception {
+        try (MongoClient mongo = MongoClients.create(EmbeddedDatabases.mongoUri())) {
+            mongo.getDatabase("api_test").getCollection("orders").insertOne(new Document("_id", 1));
+            mongo.getDatabase("api_test").getCollection("customers").insertOne(new Document("_id", 1));
+        }
+        try (Connection c = DriverManager.getConnection(EmbeddedDatabases.postgresJdbcUrl());
+             Statement s = c.createStatement()) {
+            s.execute("CREATE TABLE IF NOT EXISTS api_test_table (id int primary key)");
+        }
+        Long mongoId = create("""
+                {"name": "real-mongo", "dbType": "MONGODB", "uri": "%s", "database": "api_test"}
+                """.formatted(EmbeddedDatabases.mongoUri()));
+        Long pgId = create("""
+                {"name": "real-pg", "dbType": "POSTGRESQL", "uri": "%s"}
+                """.formatted(EmbeddedDatabases.postgresJdbcUrl()));
+
+        mvc.perform(post("/api/connections/{id}/test", mongoId))
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.product").value("MongoDB"))
+                .andExpect(jsonPath("$.version").isNotEmpty());
+        mvc.perform(get("/api/connections/{id}/collections", mongoId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0]").value("customers"))
+                .andExpect(jsonPath("$[1]").value("orders"));
+        mvc.perform(post("/api/connections/{id}/test", pgId))
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.product").value("PostgreSQL"));
+        mvc.perform(get("/api/connections/{id}/collections", pgId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasItem("public.api_test_table")));
     }
 
     @Test
