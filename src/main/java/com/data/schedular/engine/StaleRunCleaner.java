@@ -1,5 +1,6 @@
 package com.data.schedular.engine;
 
+import com.data.schedular.config.SchedularProperties;
 import com.data.schedular.domain.JobRun;
 import com.data.schedular.domain.RunStatus;
 import com.data.schedular.repository.JobRunRepository;
@@ -13,11 +14,9 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 
 /**
- * Closes runs left in RUNNING by a crash or hard stop, so they don't block new runs of the same job.
- * Their checkpoints are kept, so the next run resumes where they stopped.
- * <p>
- * Assumes a single instance: with several instances sharing the metadata DB (Quartz cluster, Phase 3)
- * this must only touch runs owned by the starting node.
+ * Closes runs that this instance left in RUNNING through a crash or hard stop, so they don't block new runs of the
+ * same job. Their checkpoints are kept, so the next run resumes where they stopped. Runs started by other instances
+ * of a cluster are left alone (see {@code schedular.node-id}).
  */
 @Component
 public class StaleRunCleaner {
@@ -25,15 +24,17 @@ public class StaleRunCleaner {
     private static final Logger log = LoggerFactory.getLogger(StaleRunCleaner.class);
 
     private final JobRunRepository runs;
+    private final String nodeId;
 
-    public StaleRunCleaner(JobRunRepository runs) {
+    public StaleRunCleaner(JobRunRepository runs, SchedularProperties properties) {
         this.runs = runs;
+        this.nodeId = properties.nodeId();
     }
 
     @EventListener(ApplicationReadyEvent.class)
     @Transactional
     public void closeStaleRuns() {
-        List<JobRun> stale = runs.findByStatus(RunStatus.RUNNING);
+        List<JobRun> stale = runs.findRunningOnNode(nodeId);
         for (JobRun run : stale) {
             run.finish(RunStatus.FAILED, "Interrupted: the application stopped while this run was in progress");
         }

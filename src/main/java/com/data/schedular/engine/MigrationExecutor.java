@@ -41,6 +41,7 @@ import com.data.schedular.service.connectivity.ConnectionResolver;
 import com.data.schedular.service.connectivity.ResolvedConnection;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -56,6 +57,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Runs one migration job: for each collection mapping, reads batches from the source, maps them to rows,
@@ -69,6 +73,8 @@ import java.util.concurrent.ConcurrentHashMap;
 public class MigrationExecutor {
 
     private static final Logger log = LoggerFactory.getLogger(MigrationExecutor.class);
+    private static final Duration SHUTDOWN_WAIT = Duration.ofSeconds(30);
+    private static final Duration CANCEL_POLL = Duration.ofMillis(100);
 
     private final MigrationJobRepository jobs;
     private final JobRunRepository runs;
@@ -81,7 +87,12 @@ public class MigrationExecutor {
     private final TransactionTemplate readOnlyTx;
     private final Duration retryBackoff;
     private final Duration maxRetryBackoff;
+    private final String nodeId;
+    /** Runs on this instance by job id; a job has at most one. */
     private final Map<Long, RunContext> active = new ConcurrentHashMap<>();
+    /** Threads for manual runs started through the API (scheduled runs use Quartz's threads). */
+    private final ExecutorService background =
+            Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("migration-run-", 0).factory());
 
     public MigrationExecutor(MigrationJobRepository jobs, JobRunRepository runs, CheckpointRepository checkpoints,
                              DeadLetterRecordRepository deadLetters, ConnectionResolver resolver,
@@ -99,37 +110,41 @@ public class MigrationExecutor {
         this.readOnlyTx.setReadOnly(true);
         this.retryBackoff = properties.engine().retryBackoff();
         this.maxRetryBackoff = properties.engine().maxRetryBackoff();
+        this.nodeId = properties.nodeId();
     }
 
     /**
-     * Runs the job on the calling thread and returns the finished run record.
+     * Runs the job on the calling thread (used by the scheduler) and returns the finished run record.
      *
      * @throws NotFoundException if the job does not exist
      * @throws ConflictException if the job is already running
      */
     public JobRun run(Long jobId, TriggerType trigger) {
-        if (!jobs.existsById(jobId)) {
-            throw new NotFoundException("Job", jobId);
-        }
-        RunContext context = new RunContext(jobId);
-        if (active.putIfAbsent(jobId, context) != null) {
-            throw new ConflictException("Job " + jobId + " is already running");
-        }
+        return execute(claim(jobId, trigger));
+    }
+
+    /**
+     * Claims the job and runs it on a background thread (used for manual runs). Returns the new RUNNING run record
+     * at once.
+     *
+     * @throws NotFoundException if the job does not exist
+     * @throws ConflictException if the job is already running
+     */
+    public JobRun start(Long jobId, TriggerType trigger) {
+        RunContext context = claim(jobId, trigger);
         try {
-            if (runs.existsByJobIdAndStatus(jobId, RunStatus.RUNNING)) {
-                throw new ConflictException("Job " + jobId + " is already running");
-            }
-            JobRun run = runs.save(JobRun.start(jobId, trigger));
-            context.runId(run.getId());
-            MDC.put("jobId", String.valueOf(jobId));
-            MDC.put("runId", String.valueOf(run.getId()));
-            return execute(context);
-        } finally {
-            active.remove(jobId);
-            Thread.interrupted(); // clear a cancel interrupt so the pooled thread is reusable
-            MDC.remove("jobId");
-            MDC.remove("runId");
+            background.execute(() -> execute(context));
+        } catch (RejectedExecutionException e) {
+            active.remove(jobId, context);
+            finish(context.runId(), RunStatus.FAILED, "The application is shutting down");
+            throw new ConflictException("The application is shutting down; try again later");
         }
+        return runs.findById(context.runId()).orElseThrow();
+    }
+
+    /** Whether this instance is running the job right now. */
+    public boolean isRunning(Long jobId) {
+        return active.containsKey(jobId);
     }
 
     /** Asks a running run to stop after its current batch. Returns false if the run is not active here. */
@@ -143,7 +158,61 @@ public class MigrationExecutor {
         return false;
     }
 
+    /** On shutdown, cancels runs in progress so they stop cleanly (status CANCELLED, checkpoint kept). */
+    @PreDestroy
+    void shutdown() throws InterruptedException {
+        background.shutdown();
+        if (active.isEmpty()) {
+            return;
+        }
+        log.info("Shutting down: cancelling {} running migration(s)", active.size());
+        active.values().forEach(RunContext::cancel);
+        long deadline = System.nanoTime() + SHUTDOWN_WAIT.toNanos();
+        while (!active.isEmpty() && System.nanoTime() < deadline) {
+            Thread.sleep(100);
+        }
+        if (!active.isEmpty()) {
+            log.warn("{} run(s) did not stop within {}s; they will be marked FAILED at next startup",
+                    active.size(), SHUTDOWN_WAIT.toSeconds());
+        }
+    }
+
+    /** Reserves the job for one run on this instance and records the run as RUNNING. */
+    private RunContext claim(Long jobId, TriggerType trigger) {
+        if (!jobs.existsById(jobId)) {
+            throw new NotFoundException("Job", jobId);
+        }
+        RunContext reservation = new RunContext(jobId, null);
+        if (active.putIfAbsent(jobId, reservation) != null) {
+            throw new ConflictException("Job " + jobId + " is already running");
+        }
+        try {
+            if (runs.existsByJobIdAndStatus(jobId, RunStatus.RUNNING)) {
+                throw new ConflictException("Job " + jobId + " is already running on another instance");
+            }
+            JobRun run = runs.save(JobRun.start(jobId, trigger, nodeId));
+            RunContext context = new RunContext(jobId, run.getId());
+            active.put(jobId, context);
+            return context;
+        } catch (RuntimeException e) {
+            active.remove(jobId, reservation);
+            throw e;
+        }
+    }
+
     private JobRun execute(RunContext context) {
+        MDC.put("jobId", String.valueOf(context.jobId()));
+        MDC.put("runId", String.valueOf(context.runId()));
+        try {
+            return executeClaimed(context);
+        } finally {
+            active.remove(context.jobId(), context);
+            MDC.remove("jobId");
+            MDC.remove("runId");
+        }
+    }
+
+    private JobRun executeClaimed(RunContext context) {
         RunStatus status;
         String error = null;
         Counters totals = new Counters();
@@ -176,16 +245,18 @@ public class MigrationExecutor {
                 }
             }
         }
-        RunStatus finalStatus = status;
-        String finalError = error;
-        JobRun finished = tx.execute(s -> {
-            JobRun run = runs.findById(context.runId()).orElseThrow();
-            run.finish(finalStatus, finalError);
-            return runs.save(run);
-        });
-        log.info("Run finished {}: {} read, {} rows written, {} failed", finalStatus, totals.read, totals.written,
+        JobRun finished = finish(context.runId(), status, error);
+        log.info("Run finished {}: {} read, {} rows written, {} failed", status, totals.read, totals.written,
                 totals.failed);
         return finished;
+    }
+
+    private JobRun finish(Long runId, RunStatus status, String error) {
+        return tx.execute(s -> {
+            JobRun run = runs.findById(runId).orElseThrow();
+            run.finish(status, error);
+            return runs.save(run);
+        });
     }
 
     private void migrateCollection(JobSnapshot job, MappingSnapshot mapping, SourceConnector source,
@@ -305,14 +376,22 @@ public class MigrationExecutor {
         return wait.compareTo(maxRetryBackoff) > 0 ? maxRetryBackoff : wait;
     }
 
+    /** Waits before a retry, in short slices so that a cancel takes effect within ~100 ms. */
     private static void sleep(Duration wait, RunContext context) {
+        long deadline = System.nanoTime() + wait.toNanos();
         try {
-            Thread.sleep(wait);
+            while (true) {
+                context.checkCancelled();
+                long left = deadline - System.nanoTime();
+                if (left <= 0) {
+                    return;
+                }
+                Thread.sleep(Duration.ofNanos(Math.min(left, CANCEL_POLL.toNanos())));
+            }
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            Thread.currentThread().interrupt(); // the thread is being shut down: stop like a cancel
             throw new RunCancelledException();
         }
-        context.checkCancelled();
     }
 
     private void saveProgress(Long runId, Checkpoint checkpoint, Counters counters, List<DeadLetterRecord> rejected) {

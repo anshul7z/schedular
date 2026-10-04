@@ -3,10 +3,10 @@
 | | |
 |---|---|
 | **System** | `schedular` |
-| **Version** | 1.1 (2026-10-04) |
+| **Version** | 1.2 (2026-10-04) |
 | **Stack** | Java 21, Spring Boot 4.1.1, Quartz, Hibernate/JPA, Flyway |
 | **Related** | [PLAN.md](PLAN.md) has the implementation plan and delivery phases |
-| **Status** | Phase 1 (foundation) and Phase 2 (migration engine, MongoDB → PostgreSQL) are implemented. Sections marked *(planned)* describe later phases. |
+| **Status** | Phases 1–3 are implemented: the connection API, the migration engine (MongoDB → PostgreSQL), and Quartz scheduling with the job and run API. Sections marked *(planned)* describe later phases. |
 
 ---
 
@@ -109,21 +109,21 @@ Adding a database means adding one implementation. The pipeline itself doesn't c
 flowchart TB
     subgraph API["API layer (api/)"]
         CC[ConnectionController]
-        JC[JobController<br/><i>planned</i>]
-        RC[RunController<br/><i>planned</i>]
+        JC[JobController]
+        RC[RunController]
         EH[GlobalExceptionHandler<br/>RFC 9457 problem JSON]
     end
 
     subgraph SVC["Service layer (service/)"]
         CS[ConnectionService]
-        JS[JobService<br/><i>planned</i>]
-        RS[RunService<br/><i>planned</i>]
+        JS[JobService]
+        RS[RunService]
         SC[SecretCipher<br/>AES-256-GCM]
         CR[ConnectionResolver<br/>validate + build URL]
         PR[ConnectionProbes<br/>Mongo / JDBC]
     end
 
-    subgraph SCH["Scheduling (scheduler/) <i>planned</i>"]
+    subgraph SCH["Scheduling (scheduler/)"]
         SS[SchedulerService]
         QJ[MigrationQuartzJob<br/>@DisallowConcurrentExecution]
     end
@@ -167,15 +167,16 @@ flowchart TB
 | `SecretCipher` | AES-256-GCM encrypt/decrypt with a random IV. Format: `v1:base64(iv‖ct‖tag)` | ✅ built |
 | `MongoConnectionProbe` / `JdbcConnectionProbe` | Check connectivity and read product/version; list collections or tables | ✅ built |
 | `GlobalExceptionHandler` | Map service errors to status codes: 400, 404, 409, 502 | ✅ built |
-| `JobService` / `JobController` | Job and mapping CRUD, cron validation, run/pause/resume/reset | planned (Phase 3) |
-| `SchedulerService` | Keep Quartz triggers in step with jobs (create, update, pause, delete, trigger now) | planned (Phase 3) |
-| `MigrationQuartzJob` | The Quartz entry point. Stops the same job running twice at once and calls the executor. | planned (Phase 3) |
+| `JobService` / `JobController` | Job CRUD with full validation (connections, cron, timezone, mapping, filter, sync/write mode, one writer per table), run now, pause/resume, reset checkpoint. An update keeps unchanged mappings (and their checkpoints). | ✅ built |
+| `SchedulerService` | Keep Quartz triggers in step with the jobs table (create, replace, remove) and reconcile at startup | ✅ built |
+| `MigrationQuartzJob` | The Quartz entry point (`@DisallowConcurrentExecution`). Skips a firing if the job is already running, and removes the schedule of a deleted job. | ✅ built |
+| `RunService` / `RunController` | Run history and details, cancel, dead letters (paged) | ✅ built |
 | `MigrationExecutor` | Runs the batch loop: transactions, checkpoints, retries, row-by-row fallback, dead letters, counters, the final status. Rejects a second concurrent run of the same job. | ✅ built |
-| `StaleRunCleaner` | At startup, marks runs left `RUNNING` by a crash as `FAILED`, keeping their checkpoints | ✅ built |
+| `StaleRunCleaner` | At startup, marks the runs this instance left `RUNNING` (matched by `node_id`) as `FAILED`, keeping their checkpoints | ✅ built |
 | `SourceConnector` (Mongo) | Read batches from one cursor, in a stable order, applying the filter and the checkpoint (id or watermark) | ✅ built |
 | `MappingCompiler` | Parse and validate the mapping JSON (unknown properties, identifiers, duplicate columns) into a `MappingPlan` | ✅ built |
 | `MappingEngine` / `TypeCoercer` | Turn a document into a parent row plus child-table rows; convert BSON values to each column type | ✅ built |
-| `SchemaInferrer` | Sample N documents and propose a mapping | planned (Phase 3) |
+| `SchemaInferrer` | Sample N documents and propose a valid mapping, including a watermark field | ✅ built |
 | `SchemaManager` | Create missing tables and columns (it only adds, never drops); check that an existing table has a key to upsert on | ✅ built |
 | `JdbcTargetWriter` | Batch upserts per table; replace child rows; truncate for `TRUNCATE_AND_LOAD` | ✅ built |
 | `SqlDialect` | Quoting, type mapping, upsert syntax, DDL, binding, and classifying errors (transient / data / fatal) per DB | ✅ PostgreSQL; others Phase 4 |
@@ -186,8 +187,8 @@ flowchart TB
 
 ### 5.1 Scheduled migration run
 
-The executor is built (Phase 2). The Quartz trigger in steps 1–2 arrives in Phase 3; until then a run is started by
-calling `MigrationExecutor.run(jobId, trigger)`.
+A manual run (`POST /api/jobs/{id}/run`) follows the same steps from step 3 on. It runs on a background thread, and
+the API returns the new `RUNNING` run immediately (`202`, with a `Location` to poll).
 
 ```mermaid
 sequenceDiagram
@@ -336,7 +337,7 @@ erDiagram
   foreign keys from jobs (`RESTRICT`).
 - `V2` widens the checkpoint columns to 2000 characters. Checkpoints are stored as type-preserving MongoDB Extended
   JSON (for example `{"v": {"$oid": "…"}}`), so an ObjectId resumes as an ObjectId, not a string.
-- Quartz's own `QRTZ_*` tables are added as Flyway `V3` in Phase 3.
+- `V3` adds Quartz's `QRTZ_*` tables (its PostgreSQL script, which also runs on H2) and `job_run.node_id`.
 
 ### 6.2 Document → relational mapping
 
@@ -439,19 +440,33 @@ That keeps child tables in step when array elements are removed at the source.
 
 ---
 
-## 8. Scheduling and concurrency *(planned, Phase 3)*
+## 8. Scheduling and concurrency
 
 - **Quartz with a JDBC JobStore, clustered.** Triggers live in the metadata DB, so a schedule survives restarts. When
   several instances run, exactly one claims each firing.
-- **One `JobDetail` per job** (`job-{id}`), using a `CronTrigger` in the job's timezone. A job with `cron = null` only
-  runs when triggered manually.
-- **No overlap:** `@DisallowConcurrentExecution` stops a job running twice at once across the whole cluster. A manual
-  trigger while a run is in progress is rejected with `409`.
+- **The jobs table is the source of truth.** `SchedulerService` derives the Quartz state from it: an enabled job
+  with a cron has one `CronTrigger` (`cron-{id}`, in the job's timezone), and any other job has none. Changes are
+  written in the same transaction as the job edit. At startup, a reconcile adds missing or changed triggers and
+  removes orphaned ones.
+- **No overlap:** `@DisallowConcurrentExecution` stops a job running twice at once across the cluster. The executor
+  also claims each job before a run, in memory and by checking the `RUNNING` run row. As a result:
+  - a manual run while one is in progress is rejected with `409`;
+  - a cron firing that finds the job running is skipped and logged;
+  - editing, deleting or resetting a running job is rejected with `409`.
+- **Pause** removes the trigger. A run already in progress continues, and manual runs are still allowed. **Resume**
+  recreates the trigger.
 - **Misfires** (for example, the app was down at fire time) use `MISFIRE_INSTRUCTION_DO_NOTHING`, so missed slots are
   not replayed in a burst.
-- **Cancel** is cooperative: the API sets a flag that the executor checks between batches, plus a Quartz `interrupt()`.
-  The run ends `CANCELLED` and keeps its checkpoint.
-- **Thread pool:** the Quartz pool size (default 5) caps how many different jobs run at once on each node.
+- **Cancel** only sets a flag. The executor checks it between batches and every 100 ms during a retry wait. It never
+  interrupts the thread, because an interrupt during JDBC I/O closes the connection mid-statement. The run ends
+  `CANCELLED` and keeps its checkpoint, so the next run continues from there. Cancel goes to the instance running
+  the run (`nodeId` on the run); another instance answers `409`.
+- **Shutdown:** in-progress runs are cancelled and given up to 30 s to stop cleanly. A run that doesn't stop in time is
+  closed as `FAILED` by `StaleRunCleaner` when that instance next starts.
+- **Thread pool:** the Quartz pool size (default 5) caps how many scheduled jobs run at once on each node. Manual runs
+  use separate virtual threads.
+- **Delegate:** `QuartzConfig` picks Quartz's JDBC delegate from the metadata DB in use (`PostgreSQLDelegate` for
+  PostgreSQL's `bytea`, the standard one for H2). An idle scheduler checks for new triggers every 5 s.
 
 ---
 
@@ -506,7 +521,7 @@ That keeps child tables in step when array elements are removed at the source.
 |---|---|
 | Health | `/actuator/health` (liveness/readiness; includes the metadata DB) ✅ |
 | Metrics | `/actuator/metrics` ✅. Per-job counters and timers are planned: `migration.docs.read`, `migration.rows.written`, `migration.docs.failed`, `migration.batch.duration`, `migration.run.duration{status}` |
-| Run history | `GET /api/jobs/{id}/runs`, `GET /api/runs/{runId}`, `GET /api/runs/{runId}/dead-letters` *(planned)* |
+| Run history | `GET /api/jobs/{id}/runs`, `GET /api/runs/{runId}`, `GET /api/runs/{runId}/dead-letters` ✅ |
 | Logging | SLF4J/Logback. `runId` and `jobId` go in the MDC during a run. Passwords never appear in logs. |
 | Alerts *(Phase 5)* | A webhook or email on `FAILED`, or when the dead-letter count passes a threshold |
 
@@ -540,9 +555,9 @@ flowchart LR
 
 | Resource | Endpoints | Status |
 |---|---|---|
-| Connections | `GET/POST /api/connections`, `GET/PUT/DELETE /api/connections/{id}`, `POST /api/connections/{id}/test`, `POST /api/connections/test`, `GET /api/connections/{id}/collections` | ✅ |
-| Jobs | `GET/POST /api/jobs`, `GET/PUT/DELETE /api/jobs/{id}`, `POST /api/jobs/{id}/infer-mapping`, `/run`, `/pause`, `/resume`, `/reset-checkpoint` | Phase 3 |
-| Runs | `GET /api/jobs/{id}/runs`, `GET /api/runs/{runId}`, `POST /api/runs/{runId}/cancel`, `GET /api/runs/{runId}/dead-letters` | Phase 3 |
+| Connections | `GET/POST /api/connections`, `GET/PUT/DELETE /api/connections/{id}`, `POST /api/connections/{id}/test`, `POST /api/connections/test`, `GET /api/connections/{id}/collections`, `GET /api/connections/{id}/collections/{collection}/mapping?sampleSize=200` (infer a mapping) | ✅ |
+| Jobs | `GET/POST /api/jobs`, `GET/PUT/DELETE /api/jobs/{id}`, `POST /api/jobs/{id}/run` (202), `/pause`, `/resume`, `/reset-checkpoint`, `GET /api/jobs/{id}/runs?page=&size=` | ✅ |
+| Runs | `GET /api/runs/{runId}`, `POST /api/runs/{runId}/cancel` (202), `GET /api/runs/{runId}/dead-letters?page=&size=` | ✅ |
 | Docs | Swagger UI via springdoc | Phase 4 |
 
 All errors use RFC 9457 `application/problem+json`.
@@ -583,5 +598,7 @@ All errors use RFC 9457 `application/problem+json`.
 | R5 | Losing `SCHEDULAR_SECRET_KEY` makes stored passwords unreadable | Store the key in a vault. A future rotation feature will help. |
 | R6 | Oracle, SQL Server and MySQL can't be integration-tested locally (no Docker on the dev machine yet). MongoDB and PostgreSQL already run as embedded processes in the tests. | Run Testcontainers in CI and test each dialect's SQL in unit tests |
 | R7 | Transient-error retries are covered by unit tests of error classification only. No test drops a real connection mid-run. | Add a fault-injection test (for example, kill the backend PID during a run) in Phase 4 hardening |
+| R8 | If a cluster node dies for good, its runs stay `RUNNING` (only the same `node-id` cleans them up at startup), which blocks new runs of those jobs | Restart a node with the same `schedular.node-id`, or add an admin "mark failed" action / heartbeat-based expiry (Phase 4) |
+| R9 | The API has no authentication yet | Spring Security in Phase 4; until then, expose the service only on a trusted network |
 | Q1 | Should a job support several targets (fan-out)? | Not in v1. Use one job per target. |
 | Q2 | Is per-record transformation scripting needed? | Deferred. Keep v1 declarative. |

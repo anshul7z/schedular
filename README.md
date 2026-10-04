@@ -9,8 +9,9 @@ roadmap is in [docs/PLAN.md](docs/PLAN.md).
   passwords, connection test, listing collections/tables).
 - **Phase 2 (migration engine), done:** MongoDB → PostgreSQL with FULL and INCREMENTAL sync, configurable mapping
   (flatten, JSON column, child tables), checkpoints and resume, retries, and dead letters for bad documents.
-- **Phase 3, next:** scheduling (Quartz) and the job/run REST API. Until then, jobs can only be created and run from
-  code; see `MigrationExecutorTest` for working examples.
+- **Phase 3 (scheduling and API), done:** cron schedules (clustered Quartz), the job and run REST API (run now,
+  pause/resume, cancel, history, dead letters), and automatic mapping suggestions.
+- **Phase 4, next:** MySQL/MariaDB, SQL Server and Oracle targets; API security; metrics; OpenAPI docs.
 
 ## Requirements
 - Java 21
@@ -42,6 +43,7 @@ $env:SCHEDULAR_SECRET_KEY = "<output of: openssl rand -base64 32>"
 |---|---|---|
 | `SCHEDULAR_SECRET_KEY` | Base64 AES-256 key for encrypting connection passwords. **Required**; keep it stable. | none |
 | `SCHEDULAR_DB_URL` / `_USER` / `_PASSWORD` | Metadata DB | docker-compose Postgres |
+| `SCHEDULAR_NODE_ID` | This instance's name in a cluster; recorded on its runs | host name |
 
 ## Connection API
 | Method | Path | Purpose |
@@ -79,6 +81,58 @@ curl -X POST localhost:8080/api/connections -H 'Content-Type: application/json' 
 curl -X POST localhost:8080/api/connections/1/test
 curl localhost:8080/api/connections/1/collections
 ```
+
+## Jobs and runs API
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/connections/{id}/collections/{collection}/mapping?sampleSize=200` | Sample a collection and propose a mapping (plus a `watermarkField` for incremental sync) |
+| `GET` / `POST` | `/api/jobs` | List or create jobs |
+| `GET` / `PUT` / `DELETE` | `/api/jobs/{id}` | Read, replace or delete a job (`409` while it is running) |
+| `POST` | `/api/jobs/{id}/run` | Start a run now: `202` with the run; poll its `Location` |
+| `POST` | `/api/jobs/{id}/pause` / `/resume` | Stop / restart the cron schedule (manual runs still work while paused) |
+| `POST` | `/api/jobs/{id}/reset-checkpoint` | Forget progress; the next run starts from the beginning |
+| `GET` | `/api/jobs/{id}/runs?page=0&size=20` | Run history, newest first |
+| `GET` | `/api/runs/{runId}` | One run: status, counts, error, duration |
+| `POST` | `/api/runs/{runId}/cancel` | Stop after the current batch; the run ends `CANCELLED` and keeps its checkpoint |
+| `GET` | `/api/runs/{runId}/dead-letters?page=0&size=50` | Documents that failed, with the reason and the document |
+
+A job's fields and their defaults:
+
+| Field | Default | Notes |
+|---|---|---|
+| `name`, `sourceConnectionId`, `targetConnectionId`, `mappings` | required | The source must be a MongoDB connection, the target a PostgreSQL one (other targets: Phase 4) |
+| `cron` | none (manual only) | Quartz format with seconds: `0 0/15 * * * ?` = every 15 minutes |
+| `timezone` | `UTC` | The zone the cron is evaluated in, e.g. `Asia/Kolkata` |
+| `enabled` | `true` | Same as pause/resume |
+| `syncMode` | `FULL` | `INCREMENTAL` needs a `watermarkField` on every mapping |
+| `writeMode` | `UPSERT` | Also `INSERT` (append-only) and `TRUNCATE_AND_LOAD` (FULL only) |
+| `batchSize` / `maxRetries` / `autoCreateSchema` | `1000` / `3` / `true` | |
+
+Each entry in `mappings` has these fields:
+- `sourceCollection` and `targetTable`
+- `mapping`: the field mapping (see [HLD §6.2](docs/HLD.md#62-document--relational-mapping)), or the one suggested by
+  the endpoint above
+- `watermarkField`: used by INCREMENTAL sync
+- `filter`: a MongoDB query that limits which documents are migrated
+
+Example: suggest a mapping, create a job that runs every 15 minutes, then run it now.
+```bash
+curl "localhost:8080/api/connections/1/collections/orders/mapping?sampleSize=200"
+
+curl -X POST localhost:8080/api/jobs -H 'Content-Type: application/json' -d '{
+  "name": "orders-sync", "sourceConnectionId": 1, "targetConnectionId": 2,
+  "cron": "0 0/15 * * * ?", "timezone": "Asia/Kolkata", "syncMode": "INCREMENTAL",
+  "mappings": [{"sourceCollection": "orders", "targetTable": "orders", "watermarkField": "updatedAt",
+                "mapping": {"fields": [{"path": "status"}, {"path": "total", "type": "DECIMAL"},
+                  {"path": "items", "strategy": "CHILD_TABLE", "childTable": "order_items",
+                   "fields": [{"path": "sku"}, {"path": "qty", "type": "INT"}]}]}}]}'
+
+curl -X POST localhost:8080/api/jobs/1/run          # -> 202, {"id": 7, "status": "RUNNING", ...}
+curl localhost:8080/api/runs/7                       # poll until status is SUCCEEDED / PARTIAL / FAILED
+```
+
+Several instances can share one metadata DB: each cron firing runs on exactly one instance. Give each instance a
+stable, unique `SCHEDULAR_NODE_ID` (default: the host name).
 
 ## How a migration run works
 For each collection mapping in a job, the run:

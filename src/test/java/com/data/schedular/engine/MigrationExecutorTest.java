@@ -330,7 +330,7 @@ class MigrationExecutorTest {
     void closesRunsLeftRunningByACrash() {
         seedOrders();
         MigrationJob job = job(SyncMode.FULL, WriteMode.UPSERT, ORDERS_MAPPING, null, true);
-        JobRun stale = runs.save(JobRun.start(job.getId(), TriggerType.CRON));
+        JobRun stale = runs.save(JobRun.start(job.getId(), TriggerType.CRON, "test-node"));
 
         assertThatThrownBy(() -> executor.run(job.getId(), TriggerType.MANUAL))
                 .isInstanceOf(ConflictException.class);

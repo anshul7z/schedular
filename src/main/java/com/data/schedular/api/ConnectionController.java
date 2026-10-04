@@ -3,6 +3,7 @@ package com.data.schedular.api;
 import com.data.schedular.api.dto.ConnectionRequest;
 import com.data.schedular.api.dto.ConnectionResponse;
 import com.data.schedular.domain.ConnectionDef;
+import com.data.schedular.engine.mapping.SchemaInferrer.InferredMapping;
 import com.data.schedular.service.ConnectionService;
 import com.data.schedular.service.connectivity.ConnectionTestResult;
 import jakarta.validation.Valid;
@@ -14,6 +15,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
@@ -75,5 +77,15 @@ public class ConnectionController {
     @GetMapping("/{id}/collections")
     public List<String> collections(@PathVariable Long id) {
         return service.listObjects(id);
+    }
+
+    /**
+     * Samples a source collection and proposes a mapping. Review it, then use {@code mapping} (and the suggested
+     * {@code watermarkField}) in a job's mappings.
+     */
+    @GetMapping("/{id}/collections/{collection}/mapping")
+    public InferredMapping inferMapping(@PathVariable Long id, @PathVariable String collection,
+                                        @RequestParam(defaultValue = "200") int sampleSize) {
+        return service.inferMapping(id, collection, sampleSize);
     }
 }

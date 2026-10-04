@@ -1,16 +1,19 @@
 package com.data.schedular.engine;
 
-/** State of one in-progress run, shared with whoever asks to cancel it. */
+/**
+ * State of one claimed or in-progress run, shared with whoever asks to cancel it.
+ * Cancelling only sets a flag: the run checks it between batches and while waiting to retry. It never interrupts
+ * the thread, because an interrupt during JDBC or MongoDB I/O closes the connection mid-statement.
+ */
 final class RunContext {
 
     private final Long jobId;
-    private final Thread thread;
-    private volatile Long runId;
+    private final Long runId;
     private volatile boolean cancelled;
 
-    RunContext(Long jobId) {
+    RunContext(Long jobId, Long runId) {
         this.jobId = jobId;
-        this.thread = Thread.currentThread();
+        this.runId = runId;
     }
 
     Long jobId() {
@@ -21,18 +24,12 @@ final class RunContext {
         return runId;
     }
 
-    void runId(Long runId) {
-        this.runId = runId;
-    }
-
     boolean isCancelled() {
         return cancelled;
     }
 
-    /** Flags the run and interrupts its thread so a retry wait ends at once; checked between batches. */
     void cancel() {
         cancelled = true;
-        thread.interrupt();
     }
 
     void checkCancelled() {

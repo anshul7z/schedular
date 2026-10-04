@@ -51,15 +51,20 @@ public class JobRun {
     @Column(name = "error_message", length = MAX_ERROR_LENGTH)
     private String errorMessage;
 
+    /** The instance executing the run. */
+    @Column(name = "node_id", length = 100)
+    private String nodeId;
+
     protected JobRun() {
     }
 
-    public static JobRun start(Long jobId, TriggerType triggerType) {
+    public static JobRun start(Long jobId, TriggerType triggerType, String nodeId) {
         JobRun run = new JobRun();
         run.jobId = jobId;
         run.triggerType = triggerType;
         run.status = RunStatus.RUNNING;
         run.startedAt = Instant.now();
+        run.nodeId = nodeId;
         return run;
     }
 
@@ -115,5 +120,9 @@ public class JobRun {
 
     public String getErrorMessage() {
         return errorMessage;
+    }
+
+    public String getNodeId() {
+        return nodeId;
     }
 }

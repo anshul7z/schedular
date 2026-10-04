@@ -3,6 +3,11 @@ package com.data.schedular.service;
 import com.data.schedular.api.dto.ConnectionRequest;
 import com.data.schedular.config.SchedularProperties;
 import com.data.schedular.domain.ConnectionDef;
+import com.data.schedular.domain.ConnectionKind;
+import com.data.schedular.engine.mapping.SchemaInferrer;
+import com.data.schedular.engine.mapping.SchemaInferrer.InferredMapping;
+import com.data.schedular.engine.source.SourceConnector;
+import com.data.schedular.engine.source.SourceConnectorFactory;
 import com.data.schedular.repository.ConnectionDefRepository;
 import com.data.schedular.repository.MigrationJobRepository;
 import com.data.schedular.service.connectivity.ConnectionProbe;
@@ -18,6 +23,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -30,23 +36,26 @@ import java.util.concurrent.TimeoutException;
 public class ConnectionService {
 
     private static final Logger log = LoggerFactory.getLogger(ConnectionService.class);
+    private static final int MAX_SAMPLE_SIZE = 1000;
 
     private final ConnectionDefRepository connections;
     private final MigrationJobRepository jobs;
     private final ConnectionResolver resolver;
     private final SecretCipher cipher;
     private final List<ConnectionProbe> probes;
+    private final SourceConnectorFactory sources;
     private final Duration timeout;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 
     public ConnectionService(ConnectionDefRepository connections, MigrationJobRepository jobs,
                              ConnectionResolver resolver, SecretCipher cipher, List<ConnectionProbe> probes,
-                             SchedularProperties properties) {
+                             SourceConnectorFactory sources, SchedularProperties properties) {
         this.connections = connections;
         this.jobs = jobs;
         this.resolver = resolver;
         this.cipher = cipher;
         this.probes = probes;
+        this.sources = sources;
         this.timeout = properties.connectionTestTimeout();
     }
 
@@ -109,6 +118,32 @@ public class ConnectionService {
         apply(def, request);
         def.setPasswordEncrypted(isEmpty(request.password()) ? null : cipher.encrypt(request.password()));
         return test(resolver.resolve(def));
+    }
+
+    /** Samples a source collection and proposes a mapping for it. */
+    public InferredMapping inferMapping(Long id, String collection, int sampleSize) {
+        if (sampleSize < 1 || sampleSize > MAX_SAMPLE_SIZE) {
+            throw new InvalidRequestException("sampleSize must be between 1 and " + MAX_SAMPLE_SIZE);
+        }
+        ConnectionDef def = get(id);
+        if (def.getKind() != ConnectionKind.SOURCE) {
+            throw new InvalidRequestException("Connection '" + def.getName() + "' is not a source");
+        }
+        ResolvedConnection connection = resolver.resolve(def);
+        List<Map<String, Object>> documents;
+        try {
+            documents = withTimeout(() -> {
+                try (SourceConnector source = sources.open(connection)) {
+                    return source.sample(collection, sampleSize);
+                }
+            });
+        } catch (TimeoutException e) {
+            throw new ConnectivityException("Timed out after " + timeout.toSeconds() + "s sampling '"
+                    + collection + "'", e);
+        } catch (Exception e) {
+            throw new ConnectivityException("Could not sample '" + collection + "': " + rootMessage(e), e);
+        }
+        return SchemaInferrer.infer(collection, documents);
     }
 
     /** Lists the collections or tables reachable through a saved connection. */

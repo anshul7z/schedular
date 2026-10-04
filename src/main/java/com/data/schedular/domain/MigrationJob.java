@@ -99,6 +99,23 @@ public class MigrationJob {
         mappings.add(mapping);
     }
 
+    /**
+     * Makes the job's mappings exactly {@code desired}, in that order. Mappings already attached to this job are
+     * kept as the same rows (so their checkpoints survive); others are removed or added.
+     */
+    public void setMappings(List<CollectionMapping> desired) {
+        mappings.removeIf(m -> !desired.contains(m));
+        for (int i = 0; i < desired.size(); i++) {
+            CollectionMapping mapping = desired.get(i);
+            if (!mappings.contains(mapping)) {
+                mapping.setJob(this);
+                mappings.add(mapping);
+            }
+            mapping.setOrderIndex(i);
+        }
+        mappings.sort(java.util.Comparator.comparingInt(CollectionMapping::getOrderIndex));
+    }
+
     public Long getId() {
         return id;
     }

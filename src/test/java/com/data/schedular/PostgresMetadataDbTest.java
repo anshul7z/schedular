@@ -1,5 +1,7 @@
 package com.data.schedular;
 
+import com.data.schedular.api.dto.JobRequest;
+import com.data.schedular.api.dto.JobResponse;
 import com.data.schedular.domain.CollectionMapping;
 import com.data.schedular.domain.ConnectionDef;
 import com.data.schedular.domain.DbType;
@@ -10,6 +12,7 @@ import com.data.schedular.domain.TriggerType;
 import com.data.schedular.engine.MigrationExecutor;
 import com.data.schedular.repository.ConnectionDefRepository;
 import com.data.schedular.repository.MigrationJobRepository;
+import com.data.schedular.service.JobService;
 import com.data.schedular.support.EmbeddedDatabases;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
@@ -65,7 +68,7 @@ class PostgresMetadataDbTest {
     void appliesMigrationsAndRunsAJobOnPostgres() {
         assertThat(jdbc.queryForObject("select current_database()", String.class)).isEqualTo(META_DB);
         assertThat(jdbc.queryForList("select version from flyway_schema_history where success order by installed_rank",
-                String.class)).containsExactly("1", "2");
+                String.class)).containsExactly("1", "2", "3");
         assertThat(jdbc.queryForObject("""
                 select character_maximum_length from information_schema.columns
                 where table_name = 'checkpoint' and column_name = 'last_id'""", Integer.class)).isEqualTo(2000);
@@ -106,7 +109,20 @@ class PostgresMetadataDbTest {
         assertThat(jdbc.queryForObject("select status from job_run where id = ?", String.class, run.getId()))
                 .isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("select count(*) from checkpoint", Integer.class)).isEqualTo(1);
+
+        // Scheduling stores the trigger (and its bytea job data) in Quartz's tables on PostgreSQL.
+        JobResponse scheduled = jobService.create(new JobRequest("customers-nightly", job.getSourceConnection().getId(),
+                job.getTargetConnection().getId(), "0 0 2 * * ?", "Asia/Kolkata", null, null, null, null, null, null,
+                List.of(new JobRequest.MappingRequest("customers", "customers_copy", null, null, null))));
+        assertThat(scheduled.nextFireTime()).isNotNull();
+        assertThat(jdbc.queryForObject("select cron_expression from qrtz_cron_triggers where trigger_name = ?",
+                String.class, "cron-" + scheduled.id())).isEqualTo("0 0 2 * * ?");
+        jobService.delete(scheduled.id());
+        assertThat(jdbc.queryForObject("select count(*) from qrtz_triggers", Integer.class)).isZero();
     }
+
+    @Autowired
+    JobService jobService;
 
     private static void createDatabase(String name) throws SQLException {
         try (Connection c = DriverManager.getConnection(EmbeddedDatabases.postgresJdbcUrl());

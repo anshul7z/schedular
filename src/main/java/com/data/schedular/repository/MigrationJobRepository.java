@@ -8,6 +8,8 @@ public interface MigrationJobRepository extends JpaRepository<MigrationJob, Long
 
     boolean existsByName(String name);
 
+    boolean existsByNameAndIdNot(String name, Long id);
+
     @Query("select count(j) > 0 from MigrationJob j "
             + "where j.sourceConnection.id = :connectionId or j.targetConnection.id = :connectionId")
     boolean existsByConnectionId(Long connectionId);

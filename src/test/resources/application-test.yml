@@ -1,4 +1,8 @@
 spring:
+  # Test contexts share one H2 database; only tests that enable it run a live scheduler,
+  # so cron triggers created by one test class never fire inside another.
+  quartz:
+    auto-startup: false
   datasource:
     url: jdbc:h2:mem:schedular-test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1
     username: sa
@@ -7,6 +11,7 @@ spring:
 schedular:
   secret-key: p1eay0WpHMCp+dvPlcx+HwHQD/eRfJUTSYKHWiZGSm0=
   connection-test-timeout: 5s
+  node-id: test-node
   engine:
     retry-backoff: 10ms
     max-retry-backoff: 50ms

@@ -1,5 +1,7 @@
 package com.data.schedular.engine.mapping;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+
 import java.util.List;
 
 /**
@@ -18,9 +20,11 @@ import java.util.List;
  * }
  * }</pre>
  */
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public record MappingSpec(PrimaryKeySpec primaryKey, List<FieldSpec> fields, UnmappedFields unmappedFields) {
 
     /** Source path and target column of the primary key; defaults to {@code _id → id STRING}. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PrimaryKeySpec(String source, String column, LogicalType type, Integer length) {
     }
 
@@ -30,12 +34,14 @@ public record MappingSpec(PrimaryKeySpec primaryKey, List<FieldSpec> fields, Unm
      * @param path       dotted path in the document (numeric segments index into arrays, e.g. {@code items.0.sku});
      *                   inside a child table, relative to the array element ({@code value} for scalar elements)
      * @param column     target column; defaults to the path with dots replaced by underscores
-     * @param type       target type; defaults to STRING (ignored for JSON and CHILD_TABLE)
+     * @param type       target type; defaults to STRING. For a CHILD_TABLE without {@code fields}, the type of its
+     *                   {@code value} column
      * @param length     maximum length for STRING columns; defaults to 255
      * @param strategy   defaults to FLATTEN
      * @param childTable target table for CHILD_TABLE
      * @param fields     element fields for CHILD_TABLE; empty means a single {@code value} column
      */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     public record FieldSpec(String path, String column, LogicalType type, Integer length, NestedStrategy strategy,
                             String childTable, List<FieldSpec> fields) {
     }

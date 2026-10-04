@@ -7,6 +7,7 @@ import com.data.schedular.service.connectivity.MongoClientFactory;
 import com.data.schedular.service.connectivity.ResolvedConnection;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCursor;
+import com.mongodb.client.model.Aggregates;
 import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.Sorts;
 import org.bson.Document;
@@ -15,6 +16,7 @@ import org.bson.json.JsonParseException;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 
 /**
@@ -68,6 +70,15 @@ public class MongoSourceConnector implements SourceConnector {
                 .batchSize(request.batchSize())
                 .cursor();
         return new MongoBatchCursor(cursor, request.batchSize());
+    }
+
+    @Override
+    public List<Map<String, Object>> sample(String collection, int size) {
+        List<Map<String, Object>> documents = new ArrayList<>(size);
+        client.getDatabase(database).getCollection(collection)
+                .aggregate(List.of(Aggregates.sample(size)))
+                .forEach(documents::add);
+        return documents;
     }
 
     @Override
